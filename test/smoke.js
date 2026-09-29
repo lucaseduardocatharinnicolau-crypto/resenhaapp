@@ -1,0 +1,23 @@
+const path=require('path');
+const {createServer}=require('C:/Users/mokuj/Desktop/RESENHA APP/server');
+const WebSocket=require('C:/Users/mokuj/Desktop/RESENHA APP/node_modules/ws');
+(async()=>{
+ const s=createServer({port:7791,password:'x',roomName:'Teste',dataDir:__dirname+'/rs-data',log:()=>{}});
+ await s.listen();
+ const info=await (await fetch('http://127.0.0.1:7791/api/info')).json(); console.log('info',info);
+ const bad=new WebSocket('ws://127.0.0.1:7791'); await new Promise(r=>bad.on('open',r)); bad.send(JSON.stringify({t:'hello',name:'a',password:'no'}));
+ await new Promise(r=>bad.on('close',(c)=>{console.log('senha errada close',c);r()}));
+ const mk=(n)=>new Promise(r=>{const w=new WebSocket('ws://[::1]:7791');w.msgs=[];w.on('message',d=>{const m=JSON.parse(d);w.msgs.push(m);if(m.t==='welcome'){w.id=m.id;w.token=m.token;r(w)}});w.on('open',()=>w.send(JSON.stringify({t:'hello',name:n,password:'x',color:'#ff0000'})));});
+ const a=await mk('Ana'), b=await mk('Beto');
+ const up=await (await fetch(`http://127.0.0.1:7791/upload?t=${a.token}&name=foto%20teste.png`,{method:'POST',headers:{'Content-Type':'image/png'},body:Buffer.from('PNGDATA12345')})).json();
+ console.log('upload',up);
+ a.send(JSON.stringify({t:'chat',text:'oi **galera**',attachments:[{id:up.id}]}));
+ a.send(JSON.stringify({t:'state',inVoice:true,muted:true}));
+ b.send(JSON.stringify({t:'signal',to:a.id,data:{x:1}}));
+ await new Promise(r=>setTimeout(r,300));
+ console.log('b recebeu', b.msgs.map(m=>m.t+(m.msg?':'+m.msg.text+' atts='+m.msg.attachments.length:'')+(m.user?':'+m.user.name+' voice='+m.user.inVoice:'')));
+ console.log('a recebeu signal', a.msgs.filter(m=>m.t==='signal'));
+ const r=await fetch(`http://127.0.0.1:7791${up.url}?t=${a.token}`,{headers:{Range:'bytes=3-6'}}); console.log('range',r.status,await r.text(), r.headers.get('content-type'));
+ console.log('sem token', (await fetch(`http://127.0.0.1:7791${up.url}`)).status);
+ a.close();b.close(); await s.close(); process.exit(0);
+})().catch(e=>{console.error(e);process.exit(1)});

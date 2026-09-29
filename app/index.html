@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data: blob: http: https:; media-src 'self' data: blob: http: https:; connect-src 'self' ws: wss: http: https:; style-src 'self' 'unsafe-inline'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self' blob:">
+<title>Resenha</title>
+<link rel="stylesheet" href="styles.css">
+<link rel="stylesheet" href="styles-v11.css">
+</head>
+<body>
+<div id="titlebar"><div class="tb-logo"><img src="icon.png" alt=""></div><div id="tb-title">Resenha</div></div>
+<div id="update-bar" class="hidden"></div>
+
+<!-- Tela inicial -->
+<div id="home" class="screen">
+  <div class="home-wrap">
+    <div class="home-brand"><img src="icon.png" alt=""><h1>Resenha</h1><p>Call, tela e chat com a galera. Sem servidor, sem Radmin.</p></div>
+    <div class="home-profile card">
+      <div class="avatar-edit" id="home-avatar" title="Trocar foto"></div>
+      <div class="field grow"><label>Seu nome</label><input id="home-name" maxlength="32" placeholder="Como te chamam"></div>
+      <div class="field"><label>Cor</label><input id="home-color" type="color"></div>
+    </div>
+    <div class="home-cards">
+      <div class="card">
+        <h2>Criar sala</h2>
+        <p class="muted">Você vira o anfitrião. A sala ganha um código e os amigos entram com ele, sem abrir porta nem usar Radmin.</p>
+        <div class="field"><label>Nome da sala</label><input id="host-name" maxlength="40" placeholder="gameplay de Deus"></div>
+        <div class="row">
+          <div class="field"><label>Porta</label><input id="host-port" type="number" min="1024" max="65000" value="7777"></div>
+          <div class="field grow"><label>Senha (opcional)</label><input id="host-pass" type="password" placeholder="sem senha"></div>
+        </div>
+        <button class="btn primary big" id="btn-host">Abrir sala</button>
+      </div>
+      <div class="card">
+        <h2>Entrar numa sala</h2>
+        <p class="muted">Cole o código da sala que o anfitrião te passou.</p>
+        <div class="field"><label>Código da sala (ou IP:porta)</label><input id="join-addr" placeholder="K7P4-QX9M" autocomplete="off" spellcheck="false"></div>
+        <div class="field"><label>Senha</label><input id="join-pass" type="password" placeholder="se tiver"></div>
+        <button class="btn primary big" id="btn-join">Entrar</button>
+        <div id="recent"></div>
+      </div>
+    </div>
+    <div id="home-error" class="error"></div>
+    <div id="home-version" class="muted small" style="text-align:center;margin-top:10px"></div>
+  </div>
+</div>
+
+<!-- App principal -->
+<div id="main" class="screen hidden">
+  <nav id="rail">
+    <div class="rail-item home" title="Início" id="rail-home"><img src="icon.png" alt=""></div>
+    <div class="rail-sep"></div>
+    <div class="rail-item active" id="rail-room" title=""></div>
+  </nav>
+
+  <aside id="sidebar">
+    <header id="room-header"><span id="room-name">Sala</span><span class="chev">▾</span>
+      <button class="icon-btn small" id="btn-invite" title="Convidar amigos"></button>
+    </header>
+    <div id="room-menu" class="dropdown hidden"></div>
+    <div id="channels">
+      <div class="cat"><span>Canais de texto</span><button class="cat-add" data-add="text" title="Criar canal de texto"></button></div>
+      <div id="text-channels"></div>
+      <div class="cat"><span>Canais de voz</span><button class="cat-add" data-add="voice" title="Criar canal de voz"></button></div>
+      <div id="voice-channels"></div>
+      <div class="cat" id="online-cat">Na sala</div>
+      <div id="online-users"></div>
+    </div>
+
+    <div id="voice-panel" class="hidden">
+      <div class="vp-top">
+        <div class="vp-status"><span id="vp-signal"></span><div><div id="vp-title" class="good">Voz conectada</div><div id="vp-sub">Lobby</div></div></div>
+        <button class="icon-btn" id="vp-leave" title="Desconectar"></button>
+      </div>
+      <div class="vp-buttons">
+        <button class="vp-btn" id="vp-share" title="Compartilhar tela"></button>
+        <button class="vp-btn" id="vp-dj" title="DJ Resenha"></button>
+        <button class="vp-btn" id="vp-invite" title="Convidar"></button>
+      </div>
+    </div>
+
+    <div id="user-panel">
+      <div class="up-user" id="up-user"><div class="avatar" id="up-avatar"></div><div class="up-names"><div id="up-name"></div><div id="up-sub">Online</div></div></div>
+      <button class="icon-btn" id="btn-mute" title="Mutar microfone (clique direito: escolher microfone)"></button>
+      <button class="icon-btn" id="btn-deafen" title="Mutar som e microfone (clique direito: escolher saída)"></button>
+      <button class="icon-btn" id="btn-settings" title="Configurações"></button>
+    </div>
+  </aside>
+
+  <section id="call">
+    <header class="pane-header"><span class="ico-vol"></span><span id="call-title">Lobby</span><span id="call-count" class="muted small"></span>
+      <button class="dj-btn" id="btn-dj" title="Chamar o DJ Resenha"></button>
+    </header>
+    <div id="call-stage"></div>
+    <div id="pips"></div>
+    <div id="call-controls">
+      <button class="cc-btn" id="cc-mute" title="Mutar microfone (clique direito: escolher microfone)"></button>
+      <button class="cc-btn" id="cc-deafen" title="Mutar som e microfone (clique direito: escolher saída)"></button>
+      <button class="cc-btn" id="cc-share" title="Compartilhar tela"></button>
+      <button class="cc-btn danger" id="cc-leave" title="Desconectar"></button>
+    </div>
+  </section>
+
+  <div id="splitter"></div>
+
+  <section id="chat">
+    <header class="pane-header"><span class="ico-hash"></span><span id="chat-title">geral</span></header>
+    <div id="messages"><div id="msg-list"></div></div>
+    <div id="typing"></div>
+    <div id="composer">
+      <div id="mention-pop" class="hidden"></div>
+      <div id="reply-bar" class="hidden"></div>
+      <div id="pending-files"></div>
+      <div class="composer-row">
+        <button class="icon-btn" id="btn-attach" title="Enviar arquivo"></button>
+        <textarea id="input" rows="1" placeholder="Conversar em #geral"></textarea>
+      </div>
+    </div>
+    <input type="file" id="file-input" multiple hidden>
+    <div id="drop-overlay" class="hidden"><div>Solte para enviar em <b id="drop-ch">#geral</b></div></div>
+  </section>
+</div>
+
+<div id="modal-root"></div>
+<div id="ctx-menu" class="hidden"></div>
+<div id="toasts"></div>
+<input type="file" id="avatar-input" accept="image/*" hidden>
+
+<script src="icons.js"></script>
+<script src="tunnel.js"></script>
+<script type="module" src="client.js"></script>
+</body>
+</html>

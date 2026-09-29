@@ -1,0 +1,48 @@
+{
+  "name": "resenha",
+  "productName": "Resenha",
+  "version": "1.1.0",
+  "description": "Call de voz, compartilhamento de tela e chat entre amigos, sem servidor central.",
+  "main": "main.js",
+  "author": "Lucas",
+  "license": "UNLICENSED",
+  "scripts": {
+    "start": "electron .",
+    "server": "node server/index.js --port 7777",
+    "dist": "electron-builder --win portable"
+  },
+  "dependencies": {
+    "mqtt": "^5.16.0",
+    "node-turn": "^0.0.6",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@sapphi-red/web-noise-suppressor": "^0.4.1",
+    "electron": "^44.4.5",
+    "electron-builder": "^26.0.0"
+  },
+  "build": {
+    "appId": "com.lucas.resenha",
+    "productName": "Resenha",
+    "files": [
+      "main.js",
+      "preload.js",
+      "net-tools.js",
+      "tunnel-main.js",
+      "updater.js",
+      "server/**",
+      "app/**",
+      "package.json"
+    ],
+    "directories": {
+      "output": "dist"
+    },
+    "win": {
+      "target": "portable",
+      "icon": "app/icon.png"
+    },
+    "portable": {
+      "artifactName": "Resenha.exe"
+    }
+  }
+}

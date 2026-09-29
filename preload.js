@@ -1,0 +1,33 @@
+const { contextBridge, ipcRenderer } = require('electron');
+
+contextBridge.exposeInMainWorld('resenhaNative', {
+  startHost: (opts) => ipcRenderer.invoke('host:start', opts),
+  stopHost: () => ipcRenderer.invoke('host:stop'),
+  hostNetwork: () => ipcRenderer.invoke('host:network'),
+  screenSources: () => ipcRenderer.invoke('screen:sources'),
+  selectScreen: (sel) => ipcRenderer.invoke('screen:select', sel),
+  setShortcuts: (map) => ipcRenderer.invoke('shortcuts:set', map),
+  notify: (n) => ipcRenderer.invoke('notify', n),
+  download: (url) => ipcRenderer.invoke('download', url),
+  voiceState: (st) => ipcRenderer.send('voice-state', st),
+  checkUpdate: () => ipcRenderer.invoke('update:check'),
+  installUpdate: (info) => ipcRenderer.invoke('update:install', info),
+  onUpdateProgress: (fn) => ipcRenderer.on('update:progress', (e, p) => fn(p)),
+  openExternal: (url) => ipcRenderer.invoke('open-external', url),
+  version: () => ipcRenderer.invoke('app:version'),
+  tun: {
+    guestStart: (code) => ipcRenderer.invoke('tun:guest-start', code),
+    guestOffer: (sdp) => ipcRenderer.invoke('tun:guest-offer', sdp),
+    hostAnswer: (a) => ipcRenderer.invoke('tun:host-answer', a),
+    stop: () => ipcRenderer.invoke('tun:stop'),
+    ready: (v) => ipcRenderer.send('tun:ready', v),
+    open: (k) => ipcRenderer.send('tun:open', k),
+    data: (k, b) => ipcRenderer.send('tun:data', k, b),
+    close: (k) => ipcRenderer.send('tun:close', k),
+    closePeer: (p) => ipcRenderer.send('tun:close-peer', p),
+    pause: (k) => ipcRenderer.send('tun:pause', k),
+    resume: (k) => ipcRenderer.send('tun:resume', k),
+    onEvent: (fn) => ipcRenderer.on('tun:event', (e, ev) => fn(ev)),
+  },
+  onShortcut: (fn) => ipcRenderer.on('shortcut', (e, action) => fn(action)),
+});

@@ -1,0 +1,33 @@
+name: Publicar versão
+
+# Como publicar uma versão nova:
+#   1. mude "version" no package.json (ex.: 1.2.0)
+#   2. git commit -am "v1.2.0" && git tag v1.2.0 && git push && git push --tags
+# O GitHub gera o Resenha.exe e cria a release. Os apps dos amigos avisam na hora que abrirem.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Gerar Resenha.exe
+        run: npx electron-builder --win portable --publish never
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      - name: Criar release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/Resenha.exe
+          generate_release_notes: true

@@ -1,0 +1,7 @@
+node_modules/
+dist/
+test/shots/
+test/rs-data*/
+test/probe/
+resenha-data/
+*.log
