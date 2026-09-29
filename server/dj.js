@@ -6,7 +6,8 @@ const path = require('path');
 const https = require('https');
 const crypto = require('crypto');
 
-const YTDLP_URL = 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe';
+const IS_WIN = process.platform === 'win32';
+const YTDLP_URL = 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/' + (IS_WIN ? 'yt-dlp.exe' : process.platform === 'darwin' ? 'yt-dlp_macos' : 'yt-dlp_linux');
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140 Safari/537.36';
 const rid = () => crypto.randomBytes(6).toString('hex');
 
@@ -33,12 +34,13 @@ async function downloadTo(url, dest) {
   const tmp = dest + '.part';
   await new Promise((resolve, reject) => { const out = fs.createWriteStream(tmp); res.pipe(out); out.on('finish', resolve); out.on('error', reject); res.on('error', reject); });
   fs.renameSync(tmp, dest);
+  if (process.platform !== 'win32') fs.chmodSync(dest, 0o755);
 }
 
 class DJTools {
   constructor({ binDir, cacheDir, nodePath, log }) {
     this.binDir = binDir; this.cacheDir = cacheDir; this.nodePath = nodePath; this.log = log || (() => {});
-    this.bin = path.join(binDir, 'yt-dlp.exe');
+    this.bin = path.join(binDir, IS_WIN ? 'yt-dlp.exe' : 'yt-dlp');
     fs.mkdirSync(binDir, { recursive: true });
     fs.mkdirSync(cacheDir, { recursive: true });
     // limpa sobras de sessões anteriores

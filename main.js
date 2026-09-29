@@ -1,4 +1,5 @@
-const { app, BrowserWindow, ipcMain, desktopCapturer, session, shell, globalShortcut, Notification, nativeImage, Menu, Tray } = require('electron');
+const { app, BrowserWindow, ipcMain, desktopCapturer, session, shell, globalShortcut, Notification, nativeImage, Menu, Tray, systemPreferences } = require('electron');
+const IS_MAC = process.platform === 'darwin';
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
@@ -36,20 +37,27 @@ const ICON = path.join(__dirname, 'app', 'icon.png');
 function showWindow() { if (!win) return; if (win.isMinimized()) win.restore(); win.show(); win.focus(); }
 
 function createWindow() {
-  Menu.setApplicationMenu(null);
+  // No Mac sem menu não funciona Cmd+C/V/Q; então deixa um menu mínimo
+  if (IS_MAC) {
+    Menu.setApplicationMenu(Menu.buildFromTemplate([
+      { label: 'Resenha', submenu: [{ role: 'about', label: 'Sobre o Resenha' }, { type: 'separator' }, { role: 'hide', label: 'Ocultar Resenha' }, { type: 'separator' }, { label: 'Sair do Resenha', accelerator: 'Cmd+Q', click: () => { quitting = true; app.quit(); } }] },
+      { label: 'Editar', submenu: [{ role: 'undo', label: 'Desfazer' }, { role: 'redo', label: 'Refazer' }, { type: 'separator' }, { role: 'cut', label: 'Recortar' }, { role: 'copy', label: 'Copiar' }, { role: 'paste', label: 'Colar' }, { role: 'selectAll', label: 'Selecionar tudo' }] },
+      { label: 'Janela', submenu: [{ role: 'minimize', label: 'Minimizar' }, { role: 'zoom', label: 'Zoom' }, { role: 'close', label: 'Fechar janela' }] },
+    ]));
+  } else Menu.setApplicationMenu(null);
   win = new BrowserWindow({
     width: 1400, height: 860, minWidth: 980, minHeight: 600,
     backgroundColor: '#313338', title: 'Resenha', icon: ICON,
     titleBarStyle: 'hidden',
-    titleBarOverlay: { color: '#1e1f22', symbolColor: '#b5bac1', height: 30 },
+    ...(IS_MAC ? { trafficLightPosition: { x: 10, y: 8 } } : { titleBarOverlay: { color: '#1e1f22', symbolColor: '#b5bac1', height: 30 } }),
     webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, nodeIntegration: false, backgroundThrottling: false, spellcheck: false },
   });
   win.loadFile(path.join(__dirname, 'app', 'index.html'));
   win.webContents.setWindowOpenHandler(({ url }) => { if (/^https?:/.test(url)) shell.openExternal(url); return { action: 'deny' }; });
   win.webContents.on('will-navigate', (e, url) => { if (!url.startsWith('file:')) { e.preventDefault(); if (/^https?:/.test(url)) shell.openExternal(url); } });
   win.webContents.on('before-input-event', (e, input) => {
-    if (input.type === 'keyDown' && (input.key === 'F12' || (input.control && input.shift && input.key.toLowerCase() === 'i'))) win.webContents.toggleDevTools();
-    if (input.type === 'keyDown' && input.control && input.key.toLowerCase() === 'r') { e.preventDefault(); }
+    if (input.type === 'keyDown' && (input.key === 'F12' || ((input.control || input.meta) && input.shift && input.key.toLowerCase() === 'i'))) win.webContents.toggleDevTools();
+    if (input.type === 'keyDown' && (input.control || input.meta) && input.key.toLowerCase() === 'r') { e.preventDefault(); }
   });
   win.on('focus', () => win.flashFrame(false));
   // X = vai pra bandeja (segundo plano). Sair de verdade: menu da bandeja.
@@ -59,7 +67,7 @@ function createWindow() {
     win.hide();
     if (!app._trayHintShown && Notification.isSupported()) {
       app._trayHintShown = true;
-      new Notification({ title: 'Resenha continua aberto', body: 'Ele está na bandeja, perto do relógio. Clique direito no ícone pra sair.', silent: true, icon: ICON }).show();
+      new Notification({ title: 'Resenha continua aberto', body: IS_MAC ? 'Ele está no ícone da barra de menus, lá em cima. Pra sair: Cmd+Q ou clique no ícone.' : 'Ele está na bandeja, perto do relógio. Clique direito no ícone pra sair.', silent: true, icon: ICON }).show();
     }
   });
   tunnel = new Tunnel(win);
@@ -67,7 +75,7 @@ function createWindow() {
 
 function createTray() {
   if (TEST_MODE) return;
-  tray = new Tray(nativeImage.createFromPath(ICON).resize({ width: 16, height: 16 }));
+  tray = new Tray(nativeImage.createFromPath(ICON).resize({ width: IS_MAC ? 18 : 16, height: IS_MAC ? 18 : 16 }));
   tray.setToolTip('Resenha');
   tray.on('click', showWindow);
   updateTrayMenu({});
@@ -88,6 +96,8 @@ function updateTrayMenu(st) {
 }
 
 app.on('second-instance', showWindow);
+// Mac: clicar no ícone do Dock traz a janela de volta
+app.on('activate', showWindow);
 
 app.whenReady().then(() => {
   const ses = session.defaultSession;
@@ -102,7 +112,7 @@ app.whenReady().then(() => {
       if (!chosen) return callback({});
       const res = { video: chosen };
       // Som do PC. O renderer pede restrictOwnAudio=true, que tira o áudio do próprio Resenha (voz dos amigos, DJ, sons)
-      if (pendingShare.audio && process.platform === 'win32') res.audio = 'loopback';
+      if (pendingShare.audio && (process.platform === 'win32' || IS_MAC)) res.audio = 'loopback';
       pendingShare = null;
       callback(res);
     } catch (e) { callback({}); }
@@ -120,6 +130,7 @@ app.whenReady().then(() => {
 
   createWindow();
   createTray();
+  if (IS_MAC) systemPreferences.askForMediaAccess('microphone').catch(() => {});
 });
 
 app.on('before-quit', () => { quitting = true; });
@@ -285,6 +296,7 @@ ipcMain.handle('update:check', async () => {
 });
 ipcMain.handle('update:install', async (e, info) => {
   try {
+    if (IS_MAC && info.manual) { shell.openExternal(info.page); return { ok: true, manual: true }; }
     await updater.install(info, (p) => win && win.webContents.send('update:progress', p), () => { quitting = true; app.quit(); });
     return { ok: true };
   } catch (err) { return { ok: false, error: err.message }; }

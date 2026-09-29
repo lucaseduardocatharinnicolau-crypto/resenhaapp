@@ -35,9 +35,11 @@ async function check(current) {
   const body = await new Promise((r, j) => { let d = ''; res.setEncoding('utf8'); res.on('data', (c) => (d += c)); res.on('end', () => r(d)); res.on('error', j); });
   const rel = JSON.parse(body);
   const version = String(rel.tag_name || '').replace(/^v/i, '');
-  const asset = (rel.assets || []).find((a) => /\.exe$/i.test(a.name));
+  // Mac: sem assinatura da Apple não dá pra trocar o app sozinho com segurança; o botão abre a página pra baixar o .zip
+  const manual = process.platform === 'darwin';
+  const asset = (rel.assets || []).find((a) => (manual ? new RegExp('mac-' + (process.arch === 'arm64' ? 'apple' : 'intel') + '\\.zip$', 'i') : /\.exe$/i).test(a.name));
   if (!asset || !newer(version, current)) return { update: false, latest: version };
-  return { update: true, version, current, notes: String(rel.body || '').slice(0, 2000), url: asset.browser_download_url, size: asset.size, name: asset.name, page: rel.html_url };
+  return { update: true, manual, version, current, notes: String(rel.body || '').slice(0, 2000), url: asset.browser_download_url, size: asset.size, name: asset.name, page: rel.html_url };
 }
 
 // Onde o .exe de verdade está (no portable o app roda de uma pasta temporária)

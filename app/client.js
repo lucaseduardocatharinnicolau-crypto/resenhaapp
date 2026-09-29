@@ -1859,6 +1859,7 @@ async function checkUpdates() {
   $('#up-x').onclick = () => { bar.classList.add('hidden'); document.body.classList.remove('has-update'); };
   $('#up-notes').onclick = () => openModal(`<header><div><h2>Novidades da v${esc(r.version)}</h2></div><button class="icon-btn" data-close>${icon('x')}</button></header><div class="body"><div class="notes">${esc(r.notes || 'Sem descrição.').replace(/\n/g, '<br>')}</div></div>`);
   $('#up-go').onclick = async () => {
+    if (r.manual) { await native.installUpdate(r); bar.innerHTML = `<span>Baixe o ${esc(r.name)} na página que abriu, descompacte e troque o app antigo na pasta Aplicativos.</span><button class="icon-btn small" id="up-x3">${icon('x', 14)}</button>`; $('#up-x3').onclick = () => { bar.classList.add('hidden'); document.body.classList.remove('has-update'); }; return; }
     if (V.joined && !await confirmModal('Atualizar agora?', 'O Resenha vai fechar e abrir de novo sozinho (leva uns segundos).', 'Atualizar', false)) return;
     bar.innerHTML = `${icon('download', 16)}<span>Baixando atualização... <b id="up-pct">0%</b></span><div class="up-bar"><div id="up-fill"></div></div>`;
     native.onUpdateProgress((p) => { const a = $('#up-pct'), f = $('#up-fill'); if (a) a.textContent = p + '%'; if (f) f.style.width = p + '%'; });

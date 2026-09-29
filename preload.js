@@ -1,6 +1,9 @@
 const { contextBridge, ipcRenderer, webFrame } = require('electron');
 
+window.addEventListener('DOMContentLoaded', () => document.documentElement.classList.add('os-' + process.platform));
+
 contextBridge.exposeInMainWorld('resenhaNative', {
+  platform: process.platform,
   startHost: (opts) => ipcRenderer.invoke('host:start', opts),
   stopHost: (code) => ipcRenderer.invoke('host:stop', code),
   cacheFile: (f) => ipcRenderer.invoke('cache:file', f),

@@ -23,6 +23,7 @@ input, textarea, select { font: inherit; color: var(--text); }
 #titlebar { height: 30px; background: var(--bg-rail); -webkit-app-region: drag; display: flex; align-items: center; justify-content: center; position: relative; font-size: 13px; font-weight: 600; color: var(--text-hi); }
 .tb-logo { position: absolute; left: 10px; top: 6px; }
 .tb-logo img { width: 18px; height: 18px; border-radius: 5px; }
+.os-darwin .tb-logo { left: 78px; } /* botões vermelho/amarelo/verde do Mac ficam à esquerda */
 .screen { position: absolute; top: 30px; left: 0; right: 0; bottom: 0; }
 
 /* Tela inicial */

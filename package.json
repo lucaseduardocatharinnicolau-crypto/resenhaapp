@@ -1,7 +1,7 @@
 {
   "name": "resenha",
   "productName": "Resenha",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "description": "Call de voz, compartilhamento de tela e chat entre amigos, sem servidor central.",
   "main": "main.js",
   "author": "Lucas",
@@ -9,7 +9,8 @@
   "scripts": {
     "start": "electron .",
     "server": "node server/index.js --port 7777",
-    "dist": "electron-builder --win portable"
+    "dist": "electron-builder --win portable",
+    "dist:mac": "electron-builder --mac dir --arm64 --x64"
   },
   "dependencies": {
     "mqtt": "^5.16.0",
@@ -43,6 +44,19 @@
     },
     "portable": {
       "artifactName": "Resenha.exe"
+    },
+    "mac": {
+      "target": "dir",
+      "icon": "app/icon.png",
+      "category": "public.app-category.social-networking",
+      "identity": "-",
+      "hardenedRuntime": false,
+      "extendInfo": {
+        "NSMicrophoneUsageDescription": "O Resenha usa o microfone para a call de voz.",
+        "NSCameraUsageDescription": "O Resenha usa a câmera se você ligar o vídeo.",
+        "NSAudioCaptureUsageDescription": "O Resenha captura o som do Mac quando você compartilha a tela com áudio.",
+        "NSScreenCaptureUsageDescription": "O Resenha precisa gravar a tela para compartilhar com os amigos."
+      }
     }
   }
 }
