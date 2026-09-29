@@ -1,8 +1,10 @@
-const { contextBridge, ipcRenderer } = require('electron');
+const { contextBridge, ipcRenderer, webFrame } = require('electron');
 
 contextBridge.exposeInMainWorld('resenhaNative', {
   startHost: (opts) => ipcRenderer.invoke('host:start', opts),
-  stopHost: () => ipcRenderer.invoke('host:stop'),
+  stopHost: (code) => ipcRenderer.invoke('host:stop', code),
+  cacheFile: (f) => ipcRenderer.invoke('cache:file', f),
+  setZoom: (z) => webFrame.setZoomFactor(Math.max(0.7, Math.min(1.5, Number(z) || 1))),
   hostNetwork: () => ipcRenderer.invoke('host:network'),
   screenSources: () => ipcRenderer.invoke('screen:sources'),
   selectScreen: (sel) => ipcRenderer.invoke('screen:select', sel),
@@ -17,7 +19,7 @@ contextBridge.exposeInMainWorld('resenhaNative', {
   version: () => ipcRenderer.invoke('app:version'),
   tun: {
     guestStart: (code) => ipcRenderer.invoke('tun:guest-start', code),
-    guestOffer: (sdp) => ipcRenderer.invoke('tun:guest-offer', sdp),
+    guestOffer: (sdp, ms) => ipcRenderer.invoke('tun:guest-offer', sdp, ms),
     hostAnswer: (a) => ipcRenderer.invoke('tun:host-answer', a),
     stop: () => ipcRenderer.invoke('tun:stop'),
     ready: (v) => ipcRenderer.send('tun:ready', v),

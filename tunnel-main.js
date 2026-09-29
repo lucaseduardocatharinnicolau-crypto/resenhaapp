@@ -29,29 +29,49 @@ function open(key, buf) {
   } catch { return null; }
 }
 
+// Conexões com os brokers ficam abertas e são reaproveitadas (trocar de papel convidado/anfitrião fica instantâneo)
+const pool = new Map(); // url -> { c, subs: Map(topic -> Set(handler)) }
+function brokerConn(url, log) {
+  let b = pool.get(url);
+  if (b) return b;
+  const c = mqtt.connect(url, { connectTimeout: 8000, reconnectPeriod: 3000, keepalive: 30, clean: true, clientId: 'rs_' + crypto.randomBytes(6).toString('hex') });
+  b = { c, subs: new Map() };
+  c.on('connect', () => { log('broker ok', url); for (const t of b.subs.keys()) c.subscribe(t, { qos: 0 }); });
+  c.on('error', (e) => log('broker erro', url, e.message));
+  c.on('message', (t, payload) => { const hs = b.subs.get(t); if (hs) for (const h of hs) h(payload); });
+  pool.set(url, b);
+  return b;
+}
 class Signal {
   constructor(code, onMsg, log) {
     this.key = keyOf(code); this.topic = topicOf(code); this.onMsg = onMsg; this.log = log || (() => {});
     this.seen = new Set();
-    this.clients = BROKERS.map((url) => {
-      const c = mqtt.connect(url, { connectTimeout: 8000, reconnectPeriod: 3000, keepalive: 30, clean: true, clientId: 'rs_' + crypto.randomBytes(6).toString('hex') });
-      c.on('connect', () => { c.subscribe(this.topic, { qos: 0 }); this.log('broker ok', url); });
-      c.on('error', (e) => this.log('broker erro', url, e.message));
-      c.on('message', (t, payload) => {
-        const m = open(this.key, payload);
-        if (!m || !m.mid || this.seen.has(m.mid)) return;
-        this.seen.add(m.mid); if (this.seen.size > 5000) this.seen = new Set([...this.seen].slice(-1000));
-        this.onMsg(m);
-      });
-      return c;
+    this.handler = (payload) => {
+      const m = open(this.key, payload);
+      if (!m || !m.mid || this.seen.has(m.mid)) return;
+      this.seen.add(m.mid); if (this.seen.size > 5000) this.seen = new Set([...this.seen].slice(-1000));
+      this.onMsg(m);
+    };
+    this.brokers = BROKERS.map((url) => {
+      const b = brokerConn(url, this.log);
+      let hs = b.subs.get(this.topic);
+      if (!hs) { hs = new Set(); b.subs.set(this.topic, hs); if (b.c.connected) b.c.subscribe(this.topic, { qos: 0 }); }
+      hs.add(this.handler);
+      return b;
     });
   }
-  connected() { return this.clients.some((c) => c.connected); }
+  connected() { return this.brokers.some((b) => b.c.connected); }
   send(obj) {
     const buf = seal(this.key, { ...obj, mid: crypto.randomBytes(8).toString('hex') });
-    for (const c of this.clients) if (c.connected) c.publish(this.topic, buf, { qos: 0 });
+    for (const b of this.brokers) if (b.c.connected) b.c.publish(this.topic, buf, { qos: 0 });
   }
-  close() { for (const c of this.clients) { try { c.end(true); } catch {} } }
+  close() {
+    for (const b of this.brokers) {
+      const hs = b.subs.get(this.topic); if (!hs) continue;
+      hs.delete(this.handler);
+      if (!hs.size) { b.subs.delete(this.topic); try { b.c.unsubscribe(this.topic); } catch {} }
+    }
+  }
 }
 
 class Tunnel {
@@ -63,16 +83,29 @@ class Tunnel {
   emit(ev) { if (this.win && !this.win.isDestroyed()) this.win.webContents.send('tun:event', ev); }
 
   // ---------- Anfitrião ----------
-  hostStart(code, port) {
+  // Se aparecerem 2 anfitriões com o mesmo código, fica o que tem mais gente;
+  // empate: troca mais recente (epoch maior); depois quem entrou antes na sala.
+  hostStart(code, port, rank, getClients) {
     this.stop();
     this.role = 'host'; this.port = port;
+    const r = Array.isArray(rank) ? rank : [0, Date.now(), crypto.randomBytes(6).toString('hex')];
+    this.rankNow = () => ({ clients: getClients ? getClients() : 1, epoch: r[0], joinedAt: r[1], id: String(r[2]) });
+    this.hostId = crypto.randomBytes(6).toString('hex');
     const nonces = new Map();
+    const better = (a, b) => (a.clients !== b.clients ? a.clients > b.clients : a.epoch !== b.epoch ? a.epoch > b.epoch : a.joinedAt !== b.joinedAt ? a.joinedAt < b.joinedAt : a.id < b.id);
     this.signal = new Signal(code, (m) => {
+      if (m.t === 'host' && m.hostId && m.hostId !== this.hostId && m.rank && typeof m.rank === 'object') {
+        if (this.role === 'host' && better(m.rank, this.rankNow())) { this.log('outro anfitrião com prioridade maior, saindo'); this.emit({ type: 'yield' }); }
+        return;
+      }
       if (m.t !== 'join' || !m.from || !m.sdp) return;
       if (nonces.get(m.from) === m.nonce) return; // repetição do mesmo pedido
       nonces.set(m.from, m.nonce);
       this.emit({ type: 'join', peerId: m.from, nonce: m.nonce, sdp: m.sdp });
     }, this.log);
+    const announce = () => { if (this.role === 'host' && this.signal) this.signal.send({ t: 'host', hostId: this.hostId, rank: this.rankNow() }); };
+    this.announceTimer = setInterval(announce, 4000);
+    setTimeout(announce, 1500);
   }
   hostAnswer(peerId, nonce, sdp) {
     if (!this.signal) return;
@@ -117,7 +150,7 @@ class Tunnel {
         if (!this.pendingAnswer || this.pendingAnswer.nonce !== nonce) return;
         if (Date.now() - t0 > timeoutMs) { this.pendingAnswer = null; return resolve({ ok: false, error: this.signal && this.signal.connected() ? 'notfound' : 'nobroker' }); }
         if (this.signal) this.signal.send({ t: 'join', from: this.peerId, nonce, sdp });
-        timer = setTimeout(tick, 2000);
+        timer = setTimeout(tick, 1200);
       };
       // espera algum broker conectar antes de publicar
       const wait = () => { if (this.signal && this.signal.connected()) tick(); else if (Date.now() - t0 > timeoutMs) resolve({ ok: false, error: 'nobroker' }); else setTimeout(wait, 200); };
@@ -144,6 +177,7 @@ class Tunnel {
   resume(key) { const s = this.sockets.get(key); if (s) s.resume(); }
 
   stop() {
+    clearInterval(this.announceTimer);
     if (this.pendingAnswer) { this.pendingAnswer.resolve && this.pendingAnswer.resolve(null); this.pendingAnswer = null; }
     if (this.signal) { this.signal.close(); this.signal = null; }
     for (const s of this.sockets.values()) s.destroy();

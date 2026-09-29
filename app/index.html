@@ -6,6 +6,7 @@
 <title>Resenha</title>
 <link rel="stylesheet" href="styles.css">
 <link rel="stylesheet" href="styles-v11.css">
+<link rel="stylesheet" href="styles-v12.css">
 </head>
 <body>
 <div id="titlebar"><div class="tb-logo"><img src="icon.png" alt=""></div><div id="tb-title">Resenha</div></div>
@@ -54,7 +55,7 @@
   </nav>
 
   <aside id="sidebar">
-    <header id="room-header"><span id="room-name">Sala</span><span class="chev">▾</span>
+    <header id="room-header" class="drag-head" draggable="true" data-pane="sidebar" title="Segure e arraste pra mudar de lugar"><span id="room-name">Sala</span><span class="chev">▾</span>
       <button class="icon-btn small" id="btn-invite" title="Convidar amigos"></button>
     </header>
     <div id="room-menu" class="dropdown hidden"></div>
@@ -88,7 +89,7 @@
   </aside>
 
   <section id="call">
-    <header class="pane-header"><span class="ico-vol"></span><span id="call-title">Lobby</span><span id="call-count" class="muted small"></span>
+    <header class="pane-header drag-head" draggable="true" data-pane="call" title="Segure e arraste pra mudar de lugar"><span class="ico-vol"></span><span id="call-title">Lobby</span><span id="call-count" class="muted small"></span>
       <button class="dj-btn" id="btn-dj" title="Chamar o DJ Resenha"></button>
     </header>
     <div id="call-stage"></div>
@@ -101,10 +102,9 @@
     </div>
   </section>
 
-  <div id="splitter"></div>
 
   <section id="chat">
-    <header class="pane-header"><span class="ico-hash"></span><span id="chat-title">geral</span></header>
+    <header class="pane-header drag-head" draggable="true" data-pane="chat" title="Segure e arraste pra mudar de lugar"><span class="ico-hash"></span><span id="chat-title">geral</span></header>
     <div id="messages"><div id="msg-list"></div></div>
     <div id="typing"></div>
     <div id="composer">
@@ -126,6 +126,7 @@
 <div id="toasts"></div>
 <input type="file" id="avatar-input" accept="image/*" hidden>
 
+<script src="themes.js"></script>
 <script src="icons.js"></script>
 <script src="tunnel.js"></script>
 <script type="module" src="client.js"></script>

@@ -35,6 +35,8 @@ function createServer(opts = {}) {
   const maxUpload = opts.maxUpload || 2 * 1024 * 1024 * 1024; // 2 GB por arquivo
   const log = opts.log || ((...a) => console.log('[sala]', ...a));
   const djTools = opts.dj || null;
+  const roomCode = opts.code || null;
+  const epoch = Number(opts.epoch) || 0; // aumenta a cada troca de anfitrião
 
   const filesDir = path.join(dataDir, 'files');
   fs.mkdirSync(filesDir, { recursive: true });
@@ -51,10 +53,22 @@ function createServer(opts = {}) {
     history = Array.isArray(h) ? { [channels.find((c) => c.type === 'text').id]: h } : h; // migra formato antigo
   } catch {}
   try { files = JSON.parse(fs.readFileSync(filesIndex, 'utf8')); } catch {}
+  // Troca de anfitrião: o novo anfitrião traz a cópia que tinha da sala
+  const R = opts.restore;
+  if (R) {
+    if (Array.isArray(R.channels) && R.channels.some((c) => c.type === 'text') && R.channels.some((c) => c.type === 'voice')) {
+      channels = R.channels.filter((c) => c && c.id && (c.type === 'text' || c.type === 'voice')).map((c) => ({ id: clean(c.id, 20), type: c.type, name: chanName(c.name, c.type) || 'canal' }));
+    }
+    if (R.history && typeof R.history === 'object') {
+      history = {};
+      for (const c of channels) if (c.type === 'text' && Array.isArray(R.history[c.id])) history[c.id] = R.history[c.id].slice(-2000);
+    }
+    for (const list of Object.values(history)) for (const m of list) for (const a of m.attachments || []) if (a && a.id && !files[a.id]) files[a.id] = a;
+  }
   const textIds = () => channels.filter((c) => c.type === 'text').map((c) => c.id);
   const findMsg = (id) => { for (const [cid, list] of Object.entries(history)) { const i = list.findIndex((m) => m.id === id); if (i > -1) return { cid, list, i, msg: list[i] }; } return null; };
 
-  const token = rid(16); // token de acesso aos anexos (muda a cada vez que a sala abre)
+  const token = opts.token || rid(16); // token de acesso aos anexos (muda a cada vez que a sala abre)
   let saveTimer = null;
   const saveNow = () => {
     try {
@@ -85,9 +99,9 @@ function createServer(opts = {}) {
   const publicUsers = () => { const l = [...clients.values()].map((c) => c.user); if (dj.active) l.push(djUser()); return l; };
   const listeners = () => [...clients.values()].filter((c) => c.user.voiceChannel && c.user.voiceChannel === dj.channelId).map((c) => c.user.id);
   const needed = () => Math.floor(listeners().length / 2) + 1; // maioria (mais da metade)
-  const pubItem = (it) => it && ({ id: it.id, title: it.title, duration: it.duration || 0, addedBy: it.addedBy, source: it.source, ready: !!it._file });
+  const pubItem = (it) => it && ({ id: it.id, title: it.title, duration: it.duration || 0, addedBy: it.addedBy, source: it.source, src: it.url || it.query, ready: !!it._file });
   const djState = () => ({
-    active: dj.active, channelId: dj.channelId, loading: dj.loading,
+    active: dj.active, channelId: dj.channelId, loading: dj.loading, textChannel: dj.textChannel,
     current: dj.current && { ...pubItem(dj.current.item), url: `/dj/${dj.current.item.id}`, startedAt: dj.current.startedAt, pausedAt: dj.current.pausedAt || null },
     queue: dj.queue.map(pubItem), skipVotes: [...dj.skipVotes], kickVotes: [...dj.kickVotes], needed: needed(),
   });
@@ -204,6 +218,22 @@ function createServer(opts = {}) {
   }
 
   // ---------------- HTTP ----------------
+  // DJ que estava tocando na sala antiga: volta com a fila (a música atual é pulada)
+  if (R && R.dj && R.dj.active && djTools) {
+    const queue = (Array.isArray(R.dj.queue) ? R.dj.queue : []).filter((q) => q && q.src).slice(0, 500).map((q) => ({
+      id: rid(6), title: clean(q.title, 200), duration: Number(q.duration) || 0, addedBy: clean(q.addedBy, 32), source: clean(q.source, 20),
+      ...(String(q.src).startsWith('ytsearch') ? { query: String(q.src) } : { url: String(q.src) }),
+    }));
+    setTimeout(() => {
+      Object.assign(dj, { active: true, channelId: R.dj.channelId, since: Date.now(), textChannel: R.dj.textChannel || null, queue });
+      if (!channels.some((c) => c.id === dj.channelId && c.type === 'voice')) dj.channelId = channels.find((c) => c.type === 'voice').id;
+      broadcast({ t: 'user-join', user: djUser() });
+      djCheckIdle();
+      if (queue.length) djNext(); else djBroadcast();
+    }, 3000);
+  }
+
+  // ---------------- HTTP ----------------
   const cors = (res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-File-Name, Range');
@@ -288,6 +318,7 @@ function createServer(opts = {}) {
 
   // ---------------- WebSocket ----------------
   const wss = new WebSocketServer({ server: httpServer, maxPayload: 256 * 1024 });
+  wss.on('error', () => {}); // erros do servidor HTTP (porta ocupada etc.) são tratados no listen()
 
   wss.on('connection', (ws) => {
     let id = null;
@@ -301,17 +332,21 @@ function createServer(opts = {}) {
         if (m.t !== 'hello') return;
         if (password && m.password !== password) { send(ws, { t: 'error', code: 'password', msg: 'Senha incorreta' }); return ws.close(4001, 'senha'); }
         clearTimeout(helloTimer);
-        id = rid(6);
+        // id fixo do cliente (mantém as ligações de voz vivas quando a sala troca de anfitrião)
+        id = typeof m.cid === 'string' && /^[a-f0-9]{12}$/.test(m.cid) ? m.cid : rid(6);
+        const old = clients.get(id);
+        if (old) { clients.delete(id); try { old.ws.terminate(); } catch {} }
         const user = {
           id, name: clean(m.name, 32) || 'Anônimo', color: /^#[0-9a-f]{6}$/i.test(m.color) ? m.color : '#5865f2',
           avatar: validAvatar(m.avatar), voiceChannel: null, muted: false, deafened: false, sharing: false, screenStreamId: null, voiceSince: null,
           isHost: !!m.hostKey && m.hostKey === opts.hostKey,
+          joinedAt: Number(m.joinedAt) > 0 ? Number(m.joinedAt) : Date.now(),
         };
         clients.set(id, { ws, user });
         const hist = {};
-        for (const cid of textIds()) hist[cid] = (history[cid] || []).slice(-250);
-        send(ws, { t: 'welcome', id, token, turn: opts.turn || null, room: { name: roomName }, serverTime: Date.now(), users: publicUsers(), channels, history: hist, dj: djState(), djAvailable: !!djTools });
-        broadcast({ t: 'user-join', user }, id);
+        for (const cid of textIds()) hist[cid] = (history[cid] || []).slice(-500);
+        send(ws, { t: 'welcome', id, token, code: roomCode, epoch, turn: opts.turn || null, room: { name: roomName }, serverTime: Date.now(), users: publicUsers(), channels, history: hist, dj: djState(), djAvailable: !!djTools });
+        if (old) broadcast({ t: 'user-update', user }, id); else broadcast({ t: 'user-join', user }, id);
         log(`${user.name} entrou (${clients.size} na sala)`);
         return;
       }
@@ -401,6 +436,15 @@ function createServer(opts = {}) {
           broadcast({ t: 'channels', channels });
           break;
         }
+        case 'ch-order': {
+          if (!Array.isArray(m.ids)) return;
+          const map = new Map(channels.map((x) => [x.id, x]));
+          const next = [...new Set(m.ids)].map((i) => map.get(i)).filter(Boolean);
+          if (next.length !== channels.length) return;
+          channels = next; saveSoon();
+          broadcast({ t: 'channels', channels });
+          break;
+        }
         case 'typing': broadcast({ t: 'typing', id, channelId: m.channelId }, id); break;
         case 'signal': {
           const target = clients.get(m.to);
@@ -414,7 +458,7 @@ function createServer(opts = {}) {
 
     ws.on('close', () => {
       clearTimeout(helloTimer);
-      if (id && clients.has(id)) {
+      if (id && clients.has(id) && clients.get(id).ws === ws) {
         const name = clients.get(id).user.name;
         clients.delete(id);
         broadcast({ t: 'user-leave', id });
@@ -434,6 +478,7 @@ function createServer(opts = {}) {
 
   return {
     port,
+    clientCount: () => clients.size,
     listen() {
       return new Promise((resolve, reject) => {
         // '::' escuta IPv4 e IPv6 ao mesmo tempo
@@ -446,12 +491,13 @@ function createServer(opts = {}) {
         httpServer.listen({ port, host: '::', ipv6Only: false }, done);
       });
     },
-    close() {
+    // code: 4002 = sala encerrada pra todos; 4003 = anfitrião saiu, outro assume; 4004 = já existe outro anfitrião
+    close(code = 4002) {
       clearInterval(heartbeat);
       clearTimeout(saveTimer);
       if (dj.active) djLeave();
       saveNow();
-      for (const ws of wss.clients) { try { ws.close(4002, 'sala encerrada'); } catch {} }
+      for (const ws of wss.clients) { try { ws.close(code, 'sala'); } catch {} }
       return new Promise((r) => { wss.close(); httpServer.close(() => r()); setTimeout(r, 1500); });
     },
   };

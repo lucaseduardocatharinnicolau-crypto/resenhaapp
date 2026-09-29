@@ -37,8 +37,10 @@ const Tun = (() => {
   }
 
   // ---------- Eventos do processo principal ----------
+  const listeners = [];
   T.onEvent(async (ev) => {
     if (ev.type === 'join') return hostAccept(ev);
+    if (ev.type === 'yield') { for (const f of listeners) f(ev); return; }
     if (ev.type === 'conn') { // convidado: nova conexão TCP local -> abre canal
       if (!guest) return T.close(ev.key);
       const dc = guest.pc.createDataChannel(ev.key, { ordered: true });
@@ -69,6 +71,7 @@ const Tun = (() => {
     if (old) { try { old.pc.close(); } catch {} T.closePeer(peerId + ':'); }
     const pc = new RTCPeerConnection({ iceServers: TUN_ICE });
     const p = { pc, chans: new Map() };
+    pc.addEventListener('connectionstatechange', () => { if (pc.connectionState === 'connected') log('convidado conectado'); });
     hostPeers.set(peerId, p);
     pc.ondatachannel = ({ channel }) => {
       if (channel.label === 'ctl') { channel.onmessage = (e) => { if (e.data === 'ping') try { channel.send('pong'); } catch {} }; return; }
@@ -93,22 +96,22 @@ const Tun = (() => {
 
   // ---------- Convidado ----------
   // Resolve com o endereço local (127.0.0.1:porta) que já leva até a sala do anfitrião
-  async function guestConnect(code, onStatus = () => {}) {
+  async function guestConnect(code, onStatus = () => {}, { attempts = 3, timeoutMs = 20000 } = {}) {
     guestClose(true);
     const port = await T.guestStart(code);
-    for (let attempt = 1; attempt <= 3; attempt++) {
-      onStatus(attempt === 1 ? 'Procurando a sala...' : `Tentando de novo (${attempt}/3)...`);
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+      onStatus(attempt === 1 ? 'Procurando a sala...' : `Tentando de novo (${attempt}/${attempts})...`);
       const pc = new RTCPeerConnection({ iceServers: TUN_ICE });
       const g = { pc, chans: new Map(), ctl: pc.createDataChannel('ctl') };
       guest = g;
       await pc.setLocalDescription(await pc.createOffer());
       await gatherDone(pc);
-      const r = await T.guestOffer({ type: 'offer', sdp: pc.localDescription.sdp });
+      const r = await T.guestOffer({ type: 'offer', sdp: pc.localDescription.sdp }, timeoutMs);
       if (guest !== g) { pc.close(); throw new Error('cancelado'); }
       if (!r || !r.ok || !r.sdp) {
         pc.close(); guest = null;
         if (r && r.error === 'nobroker') throw new Error('nobroker');
-        if (attempt === 3) throw new Error('notfound');
+        if (attempt === attempts) throw new Error('notfound');
         continue;
       }
       onStatus('Sala encontrada, conectando...');
@@ -121,11 +124,11 @@ const Tun = (() => {
         };
         g.ctl.onopen = chk; pc.onconnectionstatechange = chk; chk();
       });
-      if (!ok) { pc.close(); guest = null; if (attempt === 3) throw new Error('p2p'); continue; }
+      if (!ok) { pc.close(); guest = null; if (attempt === attempts) throw new Error('p2p'); continue; }
       pc.onconnectionstatechange = () => {
         log('convidado', pc.connectionState);
         if (['failed', 'closed', 'disconnected'].includes(pc.connectionState) && guest === g) {
-          if (pc.connectionState === 'disconnected') { setTimeout(() => { if (pc.connectionState === 'disconnected' && guest === g) guestClose(); }, 5000); return; }
+          if (pc.connectionState === 'disconnected') { setTimeout(() => { if (pc.connectionState === 'disconnected' && guest === g) guestClose(); }, 2500); return; }
           guestClose();
         }
       };
@@ -143,5 +146,5 @@ const Tun = (() => {
   }
   const guestAlive = () => !!guest && guest.ctl.readyState === 'open';
 
-  return { guestConnect, guestClose, guestAlive };
+  return { guestConnect, guestClose, guestAlive, onYield: (f) => listeners.push(f) };
 })();

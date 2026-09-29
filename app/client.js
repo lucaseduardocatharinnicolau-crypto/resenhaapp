@@ -19,12 +19,16 @@ const me = LS.get('profile', { name: '', color: COLORS[Math.floor(Math.random() 
 const settings = Object.assign({
   inputDevice: 'default', outputDevice: 'default', micGain: 100, autoSens: true, threshold: -55,
   aiNoise: true, vadSens: 60, echoCancellation: true, autoGain: true, sounds: true,
-  voiceFx: 'normal', pitchSemis: 0,
-  keyMute: '', keyDeafen: '', chatWidth: 440,
+  voiceFx: 'normal', pitchSemis: 0, theme: 'discord',
+  keyMute: '', keyDeafen: '', chatWidth: 440, sidebarWidth: 240,
+  layout: ['sidebar', 'call', 'chat'], tileOrder: [], pipCorner: 'br', fontScale: 100, compact: false,
   userVolumes: {}, userMuted: {}, streamVolumes: {},
 }, LS.get('settings', {}));
 if ('noiseSuppression' in settings) { settings.aiNoise = settings.noiseSuppression; delete settings.noiseSuppression; }
 const saveSettings = () => LS.set('settings', settings);
+// id fixo deste app: mantém as ligações de voz vivas quando a sala troca de anfitrião
+const CID = LS.get('cid') || (() => { const c = [...crypto.getRandomValues(new Uint8Array(6))].map((b) => b.toString(16).padStart(2, '0')).join(''); LS.set('cid', c); return c; })();
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const FX = {
   normal: { name: 'Normal', semis: 0, robot: 0 },
@@ -56,6 +60,7 @@ const semisToRatio = (s) => Math.pow(2, s / 12);
 
 // ---------------- Utilidades de UI ----------------
 function toast(msg, type = '', ms = 3500) {
+  for (const old of $$('#toasts .toast')) if (old.textContent === msg) old.remove();
   const t = document.createElement('div');
   t.className = 'toast ' + type; t.textContent = msg;
   $('#toasts').appendChild(t);
@@ -234,10 +239,10 @@ async function hostRoom() {
   const codes = LS.get('roomCodes', {});
   const code = codes[roomName] || (codes[roomName] = newCode());
   LS.set('roomCodes', codes);
-  const r = await native.startHost({ roomName, port, password, code });
+  const r = await native.startHost({ roomName, port, password, code, rank: [0, Date.now(), CID] });
   $('#btn-host').disabled = false;
   if (!r.ok) { $('#home-error').textContent = r.error; return; }
-  S.code = code; S.isHost = true; S.hostKey = r.hostKey; S.viaCode = null;
+  S.code = code; S.isHost = true; S.hostKey = r.hostKey; S.viaCode = null; S.joinedAt = Date.now(); S.epoch = 0; S.forceGuest = false;
   connect(parseAddr('127.0.0.1:' + r.port), password, true);
 }
 
@@ -254,7 +259,7 @@ async function joinRoom(addrText, password) {
     clearTimeout(to);
     if (info.app !== 'resenha') throw new Error('não é sala do Resenha');
     if (info.needsPassword && !password) { $('#home-error').textContent = 'Essa sala tem senha.'; $('#join-pass').focus(); $('#btn-join').disabled = false; return; }
-    S.isHost = false; S.hostKey = null; S.code = null;
+    S.isHost = false; S.hostKey = null; S.code = null; S.joinedAt = Date.now(); S.forceGuest = false;
     addRecent(a.text, info.name);
     connect(a, password, true);
   } catch (e) {
@@ -273,7 +278,7 @@ async function joinByCode(codeText, password) {
     const a = parseAddr(t.addr);
     const info = await fetch(`http://${a.text}/api/info`).then((r) => r.json());
     if (info.needsPassword && !password) { Tun.guestClose(); $('#home-error').textContent = 'Essa sala tem senha.'; $('#join-pass').focus(); $('#btn-join').disabled = false; return; }
-    S.isHost = false; S.hostKey = null; S.viaCode = code; S.code = code;
+    S.isHost = false; S.hostKey = null; S.viaCode = code; S.code = code; S.joinedAt = Date.now(); S.forceGuest = false;
     addRecent(code, info.name);
     connect(a, password, true);
   } catch (e) {
@@ -296,13 +301,15 @@ function connect(addr, password, first) {
   S.base = `http://${addr.text}`;
   const ws = new WebSocket(`ws://${addr.text}`);
   S.ws = ws;
-  ws.onopen = () => ws.send(JSON.stringify({ t: 'hello', name: me.name.trim(), color: me.color, avatar: me.avatar, password, hostKey: S.hostKey }));
+  ws.onopen = () => ws.send(JSON.stringify({ t: 'hello', cid: CID, joinedAt: S.joinedAt, name: me.name.trim(), color: me.color, avatar: me.avatar, password, hostKey: S.hostKey }));
   ws.onmessage = (ev) => { let m; try { m = JSON.parse(ev.data); } catch { return; } handle(m); };
   ws.onclose = (ev) => {
     if (S.ws !== ws || S.closing) return;
     if (ev.code === 4001) { leaveRoom(); $('#home-error').textContent = 'Senha incorreta.'; return; }
-    if (ev.code === 4002) { leaveRoom(); $('#home-error').textContent = 'O anfitrião fechou a sala.'; return; }
-    if (!S.myId && first) { leaveRoom(); $('#home-error').textContent = 'A conexão caiu antes de entrar.'; return; }
+    if (ev.code === 4002) { leaveRoom(); $('#home-error').textContent = 'O anfitrião encerrou a sala.'; return; }
+    if (!S.myId && first && ev.code !== 4004) { leaveRoom(); $('#home-error').textContent = 'A conexão caiu antes de entrar.'; return; }
+    // Sala com código: se o anfitrião cair, outro amigo assume e todo mundo reconecta sozinho
+    if (S.code && window.Tun && native) { failover(ev.code); return; }
     const wasIn = V.joined ? V.channel : null;
     teardownVoice();
     S.myId = null;
@@ -320,6 +327,93 @@ function connect(addr, password, first) {
   };
 }
 function wsSend(obj) { if (S.ws && S.ws.readyState === 1) S.ws.send(JSON.stringify(obj)); }
+
+// ---------------- Troca automática de anfitrião ----------------
+// Todo mundo guarda uma cópia da sala. Se o anfitrião cair, quem entrou primeiro (entre os que sobraram)
+// abre a sala com o MESMO código e a cópia; os outros procuram o código e reconectam.
+function successionOrder() {
+  return [...S.users.values()]
+    .filter((u) => u.id !== DJ_ID && u.joinedAt && !u.isHost)
+    .sort((a, b) => a.joinedAt - b.joinedAt || (a.id < b.id ? -1 : 1));
+}
+function snapshot() {
+  return {
+    channels: S.channels, history: S.history,
+    dj: S.dj && S.dj.active ? { active: true, channelId: S.dj.channelId, textChannel: S.dj.textChannel, queue: S.dj.queue } : null,
+  };
+}
+function showBanner(text, kind = 'warn') {
+  let b = $('#conn-banner');
+  if (!b) { b = document.createElement('div'); b.id = 'conn-banner'; $('#main').appendChild(b); }
+  b.className = kind; b.innerHTML = `<span class="spinner"></span><span>${text}</span>`;
+}
+function hideBanner() { $('#conn-banner')?.remove(); }
+
+async function failover(closeCode) {
+  if (S.failing) return;
+  S.failing = true;
+  const code = S.code, myId = S.myId, epoch = (S.epoch || 0) + 1;
+  const wasHost = S.isHost;
+  S.quietUntil = Date.now() + 20000;
+  const order = successionOrder().filter((u) => u.id !== (wasHost ? myId : null));
+  const snap = snapshot();
+  const mine = order.findIndex((u) => u.id === myId);
+  S.myId = null; S.ws = null; S.token = S.token || '';
+  setConnStatus('bad', 'Reconectando...');
+  try {
+    if (!wasHost && !S.forceGuest) {
+      // Fila de sucessão: o 1º assume já; os outros esperam um pouco pra dar chance a quem vem antes.
+      // 4004 = o anfitrião passou a sala pra outro que já existe: só procurar.
+      const delay = closeCode === 4004 ? 20000 : mine < 0 ? 12000 : mine * 6000;
+      showBanner(mine === 0 ? 'O anfitrião caiu. Você está assumindo a sala...' : 'O anfitrião caiu. Trocando de anfitrião...');
+      if (delay) {
+        // tenta achar o novo anfitrião enquanto espera a vez
+        try {
+          const t = await Tun.guestConnect(code, () => {}, { attempts: 1, timeoutMs: delay });
+          return reconnectTo(parseAddr(t.addr));
+        } catch {}
+        if (S.closing) return;
+      }
+      if (S.closing) return;
+      await becomeHost(code, epoch, snap);
+      return;
+    }
+    // Eu era o anfitrião (ou fui mandado ser convidado): procuro a sala como convidado
+    showBanner('Procurando a sala...');
+    const t = await Tun.guestConnect(code, () => {}, { attempts: 4, timeoutMs: 15000 });
+    return reconnectTo(parseAddr(t.addr));
+  } catch (e) {
+    if (S.closing) return;
+    // Ninguém respondeu: tenta assumir (se não fui eu que desisti de hospedar)
+    if (!S.forceGuest) { try { await becomeHost(code, epoch, snap); return; } catch {} }
+    S.failing = false;
+    if (S.reconnectTries++ > 8) { leaveRoom(); $('#home-error').textContent = 'Perdi a conexão com a sala.'; return; }
+    setTimeout(() => failover(closeCode), 3000);
+  } finally { S.failing = false; }
+}
+function reconnectTo(addr) {
+  S.isHost = false; S.hostKey = null; S.viaCode = S.code;
+  connect(addr, S.password, false);
+}
+async function becomeHost(code, epoch, snap) {
+  showBanner('Você virou o anfitrião da sala. Os outros estão reconectando...', 'ok');
+  const r = await native.startHost({ roomName: S.roomName, port: (S.addr && S.isHost ? S.addr.port : 7777), autoPort: true, password: S.password, code, epoch, restore: snap, rank: [epoch, S.joinedAt || Date.now(), CID] });
+  if (!r.ok) throw new Error(r.error);
+  S.isHost = true; S.hostKey = r.hostKey; S.viaCode = null;
+  toast('Você agora é o anfitrião da sala.', 'ok', 5000);
+  connect(parseAddr('127.0.0.1:' + r.port), S.password, false);
+}
+// Se aparecer outro anfitrião com prioridade maior pro mesmo código, eu passo a sala pra ele
+if (window.Tun) Tun.onYield(async () => {
+  if (!S.isHost || S.closing) return;
+  S.forceGuest = true;
+  await native.stopHost(4004);
+});
+// cópia dos anexos pequenos (até 50 MB) pra eles sobreviverem à troca de anfitrião
+function cacheAttachments(msg) {
+  if (!native || !S.code || S.isHost || !msg.attachments) return;
+  for (const a of msg.attachments) if (a.size <= 50 * 1024 * 1024) native.cacheFile({ code: S.code, id: a.id, name: a.name, size: a.size, url: fileUrl(a) });
+}
 function sendProfile() { wsSend({ t: 'profile', name: me.name, color: me.color, avatar: me.avatar }); }
 
 const textChannels = () => S.channels.filter((c) => c.type === 'text');
@@ -331,16 +425,27 @@ function handle(m) {
   switch (m.t) {
     case 'welcome': {
       S.myId = m.id; S.token = m.token; S.turn = m.turn; S.roomName = m.room.name; S.reconnectTries = 0;
+      if (m.code) S.code = m.code;
+      S.epoch = m.epoch || 0;
+      hideBanner();
       S.serverOffset = m.serverTime - Date.now();
       S.users = new Map(m.users.map((u) => [u.id, u]));
       S.channels = m.channels; S.history = m.history || {};
       S.dj = m.dj; S.djAvailable = m.djAvailable;
       if (!chanById(S.textChannel)) S.textChannel = textChannels()[0]?.id;
+      // ligações de voz com quem sumiu da sala: espera um pouco (na troca de anfitrião a galera volta aos poucos)
+      clearTimeout(S.peerSweep);
+      S.peerSweep = setTimeout(() => { for (const id of [...V.peers.keys()]) { const u = S.users.get(id); if (!u || u.voiceChannel !== V.channel) closePeer(id); } renderCall(); }, 20000);
+      for (const list of Object.values(S.history)) for (const msg of list) cacheAttachments(msg);
       showMain();
       renderMessages();
       renderAll();
       syncDJ();
-      if (S.rejoinVoice) { const c = S.rejoinVoice; S.rejoinVoice = null; joinVoice(chanById(c) ? c : voiceChannels()[0]?.id); }
+      if (V.joined) { // reconectou (troca de anfitrião): a voz continuou, só avisa o novo servidor
+        if (!chanById(V.channel)) V.channel = voiceChannels()[0]?.id;
+        wsSend({ t: 'state', voiceChannel: V.channel, muted: V.muted, deafened: V.deafened, sharing: !!V.screen, screenStreamId: V.screen ? V.screen.id : null });
+        setConnStatus('good', 'Voz conectada');
+      } else if (S.rejoinVoice) { const c = S.rejoinVoice; S.rejoinVoice = null; joinVoice(chanById(c) ? c : voiceChannels()[0]?.id); }
       else if (S.isHost && !S.invitedOnce) { S.invitedOnce = true; openInvite(); }
       break;
     }
@@ -348,7 +453,7 @@ function handle(m) {
     case 'user-join': S.users.set(m.user.id, m.user); if (m.user.id === DJ_ID && V.joined && m.user.voiceChannel === V.channel) sfx('join'); renderAll(); break;
     case 'user-leave': {
       const u = S.users.get(m.id);
-      if (u && V.joined && u.voiceChannel === V.channel) sfx('leave');
+      if (u && V.joined && u.voiceChannel === V.channel && Date.now() > (S.quietUntil || 0)) sfx('leave');
       S.users.delete(m.id); closePeer(m.id); S.typing.delete(m.id); renderAll(); renderTyping();
       break;
     }
@@ -357,8 +462,9 @@ function handle(m) {
       S.users.set(m.user.id, m.user);
       if (m.user.id !== S.myId && V.joined) {
         const wasHere = prev.voiceChannel === V.channel, isHere = m.user.voiceChannel === V.channel;
-        if (!wasHere && isHere) sfx('join');
-        if (wasHere && !isHere) { sfx('leave'); closePeer(m.user.id); }
+        const quiet = Date.now() < (S.quietUntil || 0);
+        if (!wasHere && isHere && !quiet) sfx('join');
+        if (wasHere && !isHere) { if (!quiet) sfx('leave'); closePeer(m.user.id); }
         if (prev.sharing && !m.user.sharing && V.focus === 'screen:' + m.user.id) V.focus = null;
       }
       reclassifyStreams(); applyUserVolume(m.user.id);
@@ -378,6 +484,7 @@ function handle(m) {
       const list = (S.history[msg.channelId] = S.history[msg.channelId] || []);
       list.push(msg); if (list.length > 1000) list.splice(0, 200);
       S.typing.delete(msg.userId); renderTyping();
+      cacheAttachments(msg);
       if (msg.channelId === S.textChannel) appendMessage(msg);
       else if (msg.userId !== S.myId) { S.unread.add(msg.channelId); renderChannels(); }
       if (msg.userId !== S.myId) {
@@ -419,12 +526,15 @@ function showMain() {
   $('#home-error').textContent = '';
 }
 
-async function leaveRoom() {
+async function leaveRoom(endForAll) {
   S.closing = true;
   teardownVoice();
+  hideBanner();
   try { if (S.ws) S.ws.close(); } catch {}
+  const wasHost = S.isHost;
   S.ws = null; S.myId = null; S.users.clear(); S.history = {}; S.invitedOnce = false; S.rejoinVoice = null; S.dj = null;
-  if (S.isHost && native) await native.stopHost();
+  // 4003: a sala continua com outro anfitrião. 4002: encerra pra todo mundo.
+  if (wasHost && native) await native.stopHost(endForAll ? 4002 : 4003);
   if (S.viaCode && window.Tun) Tun.guestClose();
   S.isHost = false; S.viaCode = null; S.code = null;
   syncDJ();
@@ -455,11 +565,11 @@ function statusIcons(u) {
 }
 function renderChannels() {
   $('#text-channels').innerHTML = textChannels().map((c) =>
-    `<div class="channel ${c.id === S.textChannel ? 'active' : ''} ${S.unread.has(c.id) ? 'unread' : ''}" data-ch="${c.id}">${icon('hash', 20)}<span class="cn">${esc(c.name)}</span><button class="ch-edit" data-edit="${c.id}" title="Editar canal">${icon('settings', 14)}</button></div>`).join('');
+    `<div class="channel ${c.id === S.textChannel ? 'active' : ''} ${S.unread.has(c.id) ? 'unread' : ''}" draggable="true" data-ch="${c.id}">${icon('hash', 20)}<span class="cn">${esc(c.name)}</span><button class="ch-edit" data-edit="${c.id}" title="Editar canal">${icon('settings', 14)}</button></div>`).join('');
   $('#voice-channels').innerHTML = voiceChannels().map((c) => {
     const us = usersIn(c.id);
     const since = us.filter((u) => u.voiceSince).map((u) => u.voiceSince);
-    return `<div class="channel voice ${V.joined && V.channel === c.id ? 'connected' : ''}" data-vch="${c.id}">${icon('volume', 20)}<span class="cn">${esc(c.name)}</span><span class="timer" data-since="${since.length ? Math.min(...since) : ''}"></span><button class="ch-edit" data-edit="${c.id}" title="Editar canal">${icon('settings', 14)}</button></div>
+    return `<div class="channel voice ${V.joined && V.channel === c.id ? 'connected' : ''}" draggable="true" data-vch="${c.id}">${icon('volume', 20)}<span class="cn">${esc(c.name)}</span><span class="timer" data-since="${since.length ? Math.min(...since) : ''}"></span><button class="ch-edit" data-edit="${c.id}" title="Editar canal">${icon('settings', 14)}</button></div>
       <div class="voice-users">${us.map((u) => `<div class="vu ${isSpeaking(u.id) ? 'speaking' : ''} ${u.id === DJ_ID ? 'is-dj' : ''}" data-uid="${u.id}">${avatarHTML(u)}<span class="nm">${esc(u.name)}${u.isHost ? '<span class="tag">HOST</span>' : ''}${u.id === DJ_ID ? '<span class="tag bot">BOT</span>' : ''}</span><span class="st">${statusIcons(u)}</span></div>`).join('')}</div>`;
   }).join('');
   tickTimers();
@@ -499,6 +609,7 @@ const tileCache = new Map();
 function makeTile(key) {
   const t = document.createElement('div');
   t.className = 'tile'; t.dataset.key = key;
+  if (key.startsWith('user:')) t.draggable = true;
   t.innerHTML = `<div class="tile-body"></div><div class="label"></div><div class="tile-tools"></div>`;
   t.onclick = (e) => {
     if (e.target.closest('.tile-tools')) return;
@@ -573,7 +684,7 @@ function renderCall() {
     return;
   }
   // Pessoas (e o DJ) no grid; telas compartilhadas viram miniaturas no canto
-  const people = vu.map((u) => ({ key: 'user:' + u.id, u, screen: false }));
+  const people = sortByTileOrder(vu).map((u) => ({ key: 'user:' + u.id, u, screen: false }));
   const screens = vu.filter((u) => u.sharing || (u.id === S.myId && V.screen)).map((u) => ({ key: 'screen:' + u.id, u, screen: true }));
   const keys = new Set([...people, ...screens].map((t) => t.key));
   for (const k of [...tileCache.keys()]) if (!keys.has(k)) tileCache.delete(k);
@@ -1275,6 +1386,13 @@ $('#msg-list').addEventListener('click', (e) => {
   const au = e.target.closest('.msg .avatar, .msg .author');
   if (au) { const m = findMsg(au.closest('.msg').dataset.id); if (m && m.bot) return openDJPanel(); if (m && S.users.has(m.userId)) userMenu(e, m.userId); }
 });
+$('#msg-list').addEventListener('error', (e) => {
+  // anexo que falhou durante a troca de anfitrião: tenta de novo com o endereço atual
+  const el = e.target; if (!el.matches || !el.matches('.att-img, .att-video')) return;
+  const n = +(el.dataset.retry || 0); if (n >= 4) return;
+  el.dataset.retry = n + 1;
+  setTimeout(() => { const u = new URL(el.src); const cur = new URL(S.base || u.origin); u.host = cur.host; u.searchParams.set('t', S.token); u.searchParams.set('r', n + 1); el.src = u.toString(); }, 1500 * (n + 1));
+}, true);
 $('#msg-list').addEventListener('contextmenu', (e) => {
   const el = e.target.closest('.msg'); if (!el || e.target.closest('.edit-box')) return;
   if (e.target.closest('a, img, video, audio')) return;
@@ -1555,7 +1673,18 @@ async function openSettings(tab = 'voz') {
   const fxBtns = Object.entries(FX).map(([k, f]) => `<button class="fx-btn ${settings.voiceFx === k ? 'sel' : ''}" data-fx="${k}">${esc(f.name)}${f.semis ? `<span>${f.semis > 0 ? '+' : ''}${f.semis}</span>` : ''}</button>`).join('');
   const m = openModal(`<header><div><h2>Configurações</h2></div><button class="icon-btn" data-close>${icon('x')}</button></header>
     <div class="body">
-      <div class="tabs"><div class="tab" data-t="voz">Voz</div><div class="tab" data-t="filtros">Filtros de voz</div><div class="tab" data-t="perfil">Perfil</div>${native ? '<div class="tab" data-t="atalhos">Atalhos</div>' : ''}</div>
+      <div class="tabs"><div class="tab" data-t="voz">Voz</div><div class="tab" data-t="filtros">Filtros de voz</div><div class="tab" data-t="aparencia">Aparência</div><div class="tab" data-t="perfil">Perfil</div>${native ? '<div class="tab" data-t="atalhos">Atalhos</div>' : ''}</div>
+      <div class="tp" data-p="aparencia">
+        <div class="section-title" style="margin-top:0">Tema</div>
+        <div class="theme-grid">${Object.entries(THEMES).map(([k, t]) => { const v = themePreview(k); return `<button class="theme-card ${settings.theme === k ? 'sel' : ''}" data-theme="${k}"><div class="tc-prev" style="background:${v['bg-rail']}"><i style="background:${v['bg-side']}"></i><i style="background:${v['bg-main']}"><b style="background:${v.blurple}"></b><s style="background:${v.muted}"></s><s style="background:${v.muted}"></s></i></div><span>${esc(t.name)}</span></button>`; }).join('')}</div>
+        <div class="section-title">Layout</div>
+        <div class="settings-grid">
+          <div class="field"><label>Tamanho da interface <span id="st-fs-v">${settings.fontScale}%</span></label><input type="range" id="st-fs" min="85" max="125" step="5" value="${settings.fontScale}"></div>
+          <div class="field"><label>Densidade</label><label class="check"><input type="checkbox" id="st-compact" ${settings.compact ? 'checked' : ''}> Modo compacto (mais coisa na tela)</label></div>
+        </div>
+        <p class="muted small" style="margin:4px 0 10px">Pra mudar as coisas de lugar é só <b>segurar e arrastar</b>: o topo de cada painel (Canais, Call, Chat), os canais da lista, os quadrados da call e a miniatura da tela. As bordas entre os painéis mudam a largura.</p>
+        <button class="btn" id="st-reset-layout">Voltar layout ao padrão</button>
+      </div>
       <div class="tp" data-p="perfil">
         <div class="home-profile" style="margin:0">
           <div class="avatar avatar-edit" id="st-av"></div>
@@ -1619,6 +1748,12 @@ async function openSettings(tab = 'voz') {
   $('#st-thr', el).oninput = (e) => { settings.threshold = +e.target.value; saveSettings(); };
   for (const [id, k] of [['st-ec', 'echoCancellation'], ['st-ag', 'autoGain']]) $('#' + id, el).onchange = (e) => { settings[k] = e.target.checked; remic(); };
   $('#st-snd', el).onchange = (e) => { settings.sounds = e.target.checked; saveSettings(); };
+  // Aparência
+  $$('.theme-card', el).forEach((b) => b.onclick = () => { settings.theme = b.dataset.theme; saveSettings(); applyTheme(settings.theme); $$('.theme-card', el).forEach((x) => x.classList.toggle('sel', x === b)); });
+  $('#st-fs', el).onchange = (e) => { settings.fontScale = +e.target.value; saveSettings(); applyLayout(); };
+  $('#st-fs', el).oninput = (e) => { $('#st-fs-v', el).textContent = e.target.value + '%'; };
+  $('#st-compact', el).onchange = (e) => { settings.compact = e.target.checked; saveSettings(); applyLayout(); };
+  $('#st-reset-layout', el).onclick = () => { resetLayout(); toast('Layout padrão restaurado', 'ok', 1500); };
   // Filtros
   const fxUI = () => { $$('.fx-btn', el).forEach((b) => b.classList.toggle('sel', b.dataset.fx === settings.voiceFx)); $('#st-semis-box', el).classList.toggle('hidden', settings.voiceFx !== 'custom'); };
   fxUI();
@@ -1733,6 +1868,164 @@ async function checkUpdates() {
   };
 }
 
+// ---------------- Layout: mover painéis, redimensionar, ordem dos quadrados ----------------
+const PANE_NAMES = { sidebar: 'Canais', call: 'Call', chat: 'Chat' };
+function applyLayout() {
+  const main = $('#main');
+  const order = settings.layout.filter((p) => PANE_NAMES[p]);
+  for (const p of Object.keys(PANE_NAMES)) if (!order.includes(p)) order.push(p);
+  settings.layout = order;
+  $$('.splitter', main).forEach((s) => s.remove());
+  order.forEach((p, i) => {
+    const el = $('#' + p);
+    main.appendChild(el);
+    el.classList.toggle('first-pane', i === 0);
+    if (i < order.length - 1) {
+      const sp = document.createElement('div'); sp.className = 'splitter'; sp.dataset.left = p; sp.dataset.right = order[i + 1];
+      main.appendChild(sp);
+    }
+  });
+  const r = document.documentElement.style;
+  r.setProperty('--chat-w', settings.chatWidth + 'px');
+  r.setProperty('--side-w', settings.sidebarWidth + 'px');
+  if (native && native.setZoom) native.setZoom(settings.fontScale / 100);
+  document.body.classList.toggle('compact', !!settings.compact);
+  $('#pips').dataset.corner = settings.pipCorner;
+  bindSplitters();
+  layoutGrid();
+}
+function bindSplitters() {
+  $$('.splitter').forEach((sp) => {
+    sp.onmousedown = (e) => {
+      e.preventDefault(); sp.classList.add('drag'); document.body.classList.add('resizing');
+      const L = sp.dataset.left, Rr = sp.dataset.right;
+      // redimensiona o painel de tamanho fixo (canais/chat) que está encostado nesse divisor
+      const target = [L, Rr].find((p) => p !== 'call') || 'chat';
+      const startX = e.clientX, startW = target === 'chat' ? settings.chatWidth : settings.sidebarWidth;
+      const sign = target === L ? 1 : -1;
+      const move = (ev) => {
+        const w = startW + (ev.clientX - startX) * sign;
+        if (target === 'chat') settings.chatWidth = clamp(w, 300, innerWidth * 0.6);
+        else settings.sidebarWidth = clamp(w, 200, 420);
+        document.documentElement.style.setProperty('--chat-w', settings.chatWidth + 'px');
+        document.documentElement.style.setProperty('--side-w', settings.sidebarWidth + 'px');
+        layoutGrid();
+      };
+      const up = () => { sp.classList.remove('drag'); document.body.classList.remove('resizing'); saveSettings(); removeEventListener('mousemove', move); removeEventListener('mouseup', up); };
+      addEventListener('mousemove', move); addEventListener('mouseup', up);
+    };
+    sp.ondblclick = () => { settings.chatWidth = 440; settings.sidebarWidth = 240; saveSettings(); applyLayout(); };
+  });
+}
+function initLayout() {
+  applyLayout();
+  // Arrastar painéis pelo "pegador" do cabeçalho
+  let dragPane = null;
+  $$('.drag-head').forEach((g) => {
+    g.addEventListener('dragstart', (e) => { if (e.target.closest('button, input')) { e.preventDefault(); return; } dragPane = g.dataset.pane; e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/resenha-pane', dragPane); document.body.classList.add('dragging-pane'); $('#' + dragPane).classList.add('pane-dragging'); });
+    g.addEventListener('dragend', () => { document.body.classList.remove('dragging-pane'); $$('.pane-dragging, .drop-left, .drop-right').forEach((x) => x.classList.remove('pane-dragging', 'drop-left', 'drop-right')); dragPane = null; });
+  });
+  // Reordenar canais segurando e arrastando (vale pra todo mundo da sala)
+  let dragCh = null;
+  for (const box of [$('#text-channels'), $('#voice-channels')]) {
+    box.addEventListener('dragstart', (e) => {
+      const ch = e.target.closest('[data-ch], [data-vch]'); if (!ch) return;
+      dragCh = ch.dataset.ch || ch.dataset.vch; e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/resenha-ch', dragCh); ch.classList.add('ch-dragging');
+    });
+    box.addEventListener('dragend', () => { dragCh = null; $$('.ch-dragging, .ch-over-top, .ch-over-bottom').forEach((x) => x.classList.remove('ch-dragging', 'ch-over-top', 'ch-over-bottom')); });
+    box.addEventListener('dragover', (e) => {
+      const ch = e.target.closest('[data-ch], [data-vch]'); if (!dragCh || !ch) return;
+      const id = ch.dataset.ch || ch.dataset.vch; if (id === dragCh || chanById(id)?.type !== chanById(dragCh)?.type) return;
+      e.preventDefault();
+      const r = ch.getBoundingClientRect(); const top = e.clientY < r.top + r.height / 2;
+      $$('.ch-over-top, .ch-over-bottom').forEach((x) => x !== ch && x.classList.remove('ch-over-top', 'ch-over-bottom'));
+      ch.classList.toggle('ch-over-top', top); ch.classList.toggle('ch-over-bottom', !top);
+    });
+    box.addEventListener('drop', (e) => {
+      const ch = e.target.closest('[data-ch], [data-vch]'); if (!dragCh || !ch) return;
+      const id = ch.dataset.ch || ch.dataset.vch; if (id === dragCh) return;
+      e.preventDefault();
+      const top = ch.classList.contains('ch-over-top');
+      const ids = S.channels.map((c) => c.id).filter((x) => x !== dragCh);
+      ids.splice(ids.indexOf(id) + (top ? 0 : 1), 0, dragCh);
+      wsSend({ t: 'ch-order', ids });
+    });
+  }
+  for (const p of Object.keys(PANE_NAMES)) {
+    const el = $('#' + p);
+    el.addEventListener('dragover', (e) => {
+      if (!dragPane || dragPane === p) return;
+      e.preventDefault();
+      const r = el.getBoundingClientRect(); const left = e.clientX < r.left + r.width / 2;
+      el.classList.toggle('drop-left', left); el.classList.toggle('drop-right', !left);
+    });
+    el.addEventListener('dragleave', (e) => { if (!el.contains(e.relatedTarget)) el.classList.remove('drop-left', 'drop-right'); });
+    el.addEventListener('drop', (e) => {
+      if (!dragPane || dragPane === p) return;
+      e.preventDefault(); e.stopPropagation();
+      const left = el.classList.contains('drop-left');
+      const order = settings.layout.filter((x) => x !== dragPane);
+      order.splice(order.indexOf(p) + (left ? 0 : 1), 0, dragPane);
+      settings.layout = order; saveSettings();
+      el.classList.remove('drop-left', 'drop-right');
+      applyLayout();
+      toast('Layout salvo. Pra voltar ao padrão: Configurações > Aparência.', 'ok', 2500);
+    });
+  }
+  // Reordenar quadrados da call arrastando
+  $('#call-stage').addEventListener('dragstart', (e) => {
+    const t = e.target.closest('.grid > .tile, .focus-strip > .tile'); if (!t) return;
+    e.dataTransfer.setData('text/resenha-tile', t.dataset.key); e.dataTransfer.effectAllowed = 'move'; t.classList.add('tile-dragging');
+  });
+  $('#call-stage').addEventListener('dragend', () => $$('.tile-dragging, .tile-over').forEach((x) => x.classList.remove('tile-dragging', 'tile-over')));
+  $('#call-stage').addEventListener('dragover', (e) => { const t = e.target.closest('.tile'); if (t && e.dataTransfer.types.includes('text/resenha-tile')) { e.preventDefault(); $$('.tile-over').forEach((x) => x !== t && x.classList.remove('tile-over')); t.classList.add('tile-over'); } });
+  $('#call-stage').addEventListener('drop', (e) => {
+    const key = e.dataTransfer.getData('text/resenha-tile'); const t = e.target.closest('.tile');
+    if (!key || !t || t.dataset.key === key) return;
+    e.preventDefault();
+    const keys = [...t.parentElement.children].map((x) => x.dataset.key);
+    const order = keys.filter((k) => k !== key); order.splice(order.indexOf(t.dataset.key) + (keys.indexOf(key) < keys.indexOf(t.dataset.key) ? 1 : 0), 0, key);
+    const uid = (k) => k.split(':')[1];
+    const known = settings.tileOrder.filter((u) => !order.map(uid).includes(u));
+    settings.tileOrder = [...order.map(uid), ...known].slice(0, 60); saveSettings();
+    renderCall();
+  });
+  // Mover a miniatura da tela compartilhada pra qualquer canto
+  const pips = $('#pips');
+  pips.addEventListener('mousedown', (e) => {
+    if (e.button !== 0 || e.target.closest('.tile-tools')) return;
+    const t = e.target.closest('.tile'); if (!t) return;
+    const sx = e.clientX, sy = e.clientY, r0 = pips.getBoundingClientRect(), box = $('#call').getBoundingClientRect();
+    let moved = false;
+    const move = (ev) => {
+      const dx = ev.clientX - sx, dy = ev.clientY - sy;
+      if (!moved && Math.hypot(dx, dy) < 6) return;
+      moved = true; pips.classList.add('moving');
+      pips.style.left = clamp(r0.left - box.left + dx, 0, box.width - r0.width) + 'px';
+      pips.style.top = clamp(r0.top - box.top + dy, 0, box.height - r0.height) + 'px';
+      pips.style.right = pips.style.bottom = 'auto';
+    };
+    const up = (ev) => {
+      removeEventListener('mousemove', move); removeEventListener('mouseup', up);
+      if (!moved) return;
+      pips.classList.remove('moving');
+      const cx = ev.clientX - box.left, cy = ev.clientY - box.top;
+      settings.pipCorner = (cy < box.height / 2 ? 't' : 'b') + (cx < box.width / 2 ? 'l' : 'r');
+      pips.removeAttribute('style'); pips.dataset.corner = settings.pipCorner; saveSettings();
+      pips.addEventListener('click', (ce) => ce.stopPropagation(), { capture: true, once: true });
+    };
+    addEventListener('mousemove', move); addEventListener('mouseup', up);
+  });
+}
+function sortByTileOrder(list) {
+  const pos = (u) => { const i = settings.tileOrder.indexOf(u.id); return i < 0 ? 1e6 + (u.joinedAt || 0) : i; };
+  return [...list].sort((a, b) => pos(a) - pos(b));
+}
+function resetLayout() {
+  Object.assign(settings, { layout: ['sidebar', 'call', 'chat'], chatWidth: 440, sidebarWidth: 240, tileOrder: [], pipCorner: 'br' });
+  saveSettings(); applyLayout(); renderCall();
+}
+
 // ---------------- Ligações de UI ----------------
 function bind() {
   $('#btn-invite').innerHTML = icon('userPlus', 18);
@@ -1775,19 +2068,12 @@ function bind() {
   $('#text-channels').oncontextmenu = chCtx; $('#voice-channels').oncontextmenu = chCtx;
   $('#online-users').oncontextmenu = (e) => { const el = e.target.closest('[data-uid]'); if (el) userMenu(e, el.dataset.uid); };
   $('#online-users').onclick = (e) => { const el = e.target.closest('[data-uid]'); if (el) userMenu(e, el.dataset.uid); };
-  // Splitter chat/call
-  document.documentElement.style.setProperty('--chat-w', settings.chatWidth + 'px');
-  const sp = $('#splitter');
-  sp.onmousedown = (e) => {
-    e.preventDefault(); sp.classList.add('drag');
-    const move = (ev) => { settings.chatWidth = clamp(innerWidth - ev.clientX, 320, innerWidth * 0.7); document.documentElement.style.setProperty('--chat-w', settings.chatWidth + 'px'); layoutGrid(); };
-    const up = () => { sp.classList.remove('drag'); saveSettings(); removeEventListener('mousemove', move); removeEventListener('mouseup', up); };
-    addEventListener('mousemove', move); addEventListener('mouseup', up);
-  };
+  initLayout();
   navigator.mediaDevices?.addEventListener?.('devicechange', () => { if (V.joined && settings.inputDevice === 'default') openMic().catch(() => {}); });
 }
 
-window.__resenha = { joinByCode, S, V, settings, joinVoice, leaveVoice, setMuted, setDeafened, sendMessage, hostRoom, joinRoom, toggleShare, startShareWithStream, applyUserVolume, applyVoiceFx, applyNoiseMode, selectTextChannel, openDJPanel, summonDJ, startEdit, msgAction, deviceMenu, wsSend, openSettings };
+window.__resenha = { failover, successionOrder, applyLayout, resetLayout, joinByCode, S, V, settings, joinVoice, leaveVoice, setMuted, setDeafened, sendMessage, hostRoom, joinRoom, toggleShare, startShareWithStream, applyUserVolume, applyVoiceFx, applyNoiseMode, selectTextChannel, openDJPanel, summonDJ, startEdit, msgAction, deviceMenu, wsSend, openSettings };
+applyTheme(settings.theme);
 bind();
 initHome();
 registerShortcuts();

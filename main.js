@@ -123,31 +123,42 @@ app.whenReady().then(() => {
 });
 
 app.on('before-quit', () => { quitting = true; });
-app.on('window-all-closed', async () => { await stopHost(); app.quit(); });
+app.on('window-all-closed', async () => { await stopHost(4003); app.quit(); });
+let quitStopped = false;
+app.on('before-quit', (e) => {
+  // fechar pela bandeja: a sala passa pra outro amigo em vez de acabar
+  if (host && !quitStopped) { e.preventDefault(); quitStopped = true; stopHost(4003).finally(() => app.quit()); }
+});
 app.on('will-quit', () => globalShortcut.unregisterAll());
 
 const RELAY_RANGE = 300; // portas UDP locais dos relays TURN (não precisam abrir no roteador)
-async function stopHost() {
+async function stopHost(code = 4002) {
   if (!host) return;
   const h = host; host = null;
   try { if (tunnel && tunnel.role === 'host') tunnel.stop(); } catch {}
   try { if (h.turn) h.turn.stop(); } catch {}
   try { await h.mapper.close(); } catch {}
-  try { await h.server.close(); } catch {}
+  try { await h.server.close(code); } catch {}
 }
 
 // ---------- IPC ----------
 ipcMain.handle('host:start', async (e, opts) => {
   await stopHost();
-  const port = Math.max(1024, Math.min(65000, Number(opts.port) || 7777));
   const hostKey = crypto.randomBytes(16).toString('hex');
   const safeRoom = String(opts.roomName || 'sala').replace(/[^\w\- ]/g, '_').slice(0, 40) || 'sala';
+  const dataDir = path.join(app.getPath('userData'), 'salas', safeRoom);
   const turnPass = crypto.randomBytes(12).toString('hex');
-  const server = createServer({ port, password: opts.password || '', roomName: opts.roomName, hostKey, dj: djTools,
-    turn: { port, username: 'resenha', credential: turnPass },
-    dataDir: path.join(app.getPath('userData'), 'salas', safeRoom), log: (...a) => console.log('[sala]', ...a) });
-  try { await server.listen(); } catch (err) {
-    return { ok: false, error: err.code === 'EADDRINUSE' ? `A porta ${port} já está em uso. Escolha outra.` : err.message };
+  if (opts.restore) restoreCachedFiles(opts.code, opts.restore, dataDir);
+  let port = Math.max(1024, Math.min(65000, Number(opts.port) || 7777));
+  let server = null;
+  for (let tries = 0; ; tries++) {
+    server = createServer({ port, password: opts.password || '', roomName: opts.roomName, hostKey, dj: djTools, code: opts.code, epoch: opts.epoch,
+      restore: opts.restore, turn: { port, username: 'resenha', credential: turnPass }, dataDir, log: (...a) => console.log('[sala]', ...a) });
+    try { await server.listen(); break; } catch (err) {
+      try { await server.close(); } catch {}
+      if (err.code === 'EADDRINUSE' && opts.autoPort && tries < 10) { port += 400; continue; }
+      return { ok: false, error: err.code === 'EADDRINUSE' ? `A porta ${port} já está em uso. Escolha outra.` : err.message };
+    }
   }
   // Relay TURN embutido: quando dois amigos não conseguem falar direto, a voz/tela passa pelo PC do anfitrião
   let turn = null;
@@ -159,13 +170,13 @@ ipcMain.handle('host:start', async (e, opts) => {
   } catch (err) { console.log('[turn] falhou', err.message); turn = null; }
   const mapper = new net.PortMapper();
   host = { server, mapper, port, hostKey, udpPorts: [port], turn };
-  if (opts.code) tunnel.hostStart(opts.code, port);
+  if (opts.code) tunnel.hostStart(opts.code, port, opts.rank, () => server.clientCount());
   return { ok: true, port, hostKey };
 });
 
 // ---------- Túnel (código da sala) ----------
 ipcMain.handle('tun:guest-start', (e, code) => tunnel.guestStart(code));
-ipcMain.handle('tun:guest-offer', (e, sdp) => tunnel.guestOffer(sdp));
+ipcMain.handle('tun:guest-offer', (e, sdp, ms) => tunnel.guestOffer(sdp, Math.max(3000, Math.min(60000, Number(ms) || 20000))));
 ipcMain.handle('tun:host-answer', (e, a) => tunnel.hostAnswer(a.peerId, a.nonce, a.sdp));
 ipcMain.handle('tun:stop', () => { if (tunnel.role === 'guest') tunnel.stop(); });
 ipcMain.on('tun:ready', (e, v) => tunnel.setReady(!!v));
@@ -176,7 +187,51 @@ ipcMain.on('tun:close-peer', (e, prefix) => tunnel.closePeer(prefix));
 ipcMain.on('tun:pause', (e, key) => tunnel.pause(key));
 ipcMain.on('tun:resume', (e, key) => tunnel.resume(key));
 
-ipcMain.handle('host:stop', async () => { await stopHost(); return true; });
+// ---------- Cópia dos anexos (pra sala sobreviver à troca de anfitrião) ----------
+const CACHE_MAX = 50 * 1024 * 1024;
+const cacheRoot = () => path.join(app.getPath('userData'), 'anexos-cache');
+const codeKey = (c) => String(c || '').toUpperCase().replace(/[^A-Z0-9]/g, '') || 'sem-codigo';
+const safeName = (s) => String(s || 'arquivo').replace(/[\\/:*?"<>|\u0000-\u001f]/g, '_').slice(0, 180) || 'arquivo';
+const cacheQueue = []; let cacheBusy = 0;
+function pumpCache() {
+  while (cacheBusy < 2 && cacheQueue.length) {
+    const job = cacheQueue.shift(); cacheBusy++;
+    downloadToFile(job.url, job.dest).catch(() => {}).finally(() => { cacheBusy--; pumpCache(); });
+  }
+}
+function downloadToFile(url, dest) {
+  return new Promise((resolve, reject) => {
+    const mod = url.startsWith('https') ? require('https') : require('http');
+    mod.get(url, { timeout: 60000 }, (res) => {
+      if (res.statusCode !== 200) { res.resume(); return reject(new Error('HTTP ' + res.statusCode)); }
+      fs.mkdirSync(path.dirname(dest), { recursive: true });
+      const tmp = dest + '.part';
+      const out = fs.createWriteStream(tmp);
+      res.pipe(out);
+      out.on('finish', () => { try { fs.renameSync(tmp, dest); resolve(); } catch (e) { reject(e); } });
+      out.on('error', reject); res.on('error', reject);
+    }).on('error', reject).on('timeout', function () { this.destroy(new Error('timeout')); });
+  });
+}
+ipcMain.handle('cache:file', (e, f) => {
+  if (!f || !f.url || !f.id || !/^http:\/\//.test(f.url) || !(f.size > 0) || f.size > CACHE_MAX) return false;
+  const dest = path.join(cacheRoot(), codeKey(f.code), safeName(f.id), safeName(f.name));
+  if (fs.existsSync(dest) || cacheQueue.some((j) => j.dest === dest)) return true;
+  cacheQueue.push({ url: f.url, dest }); pumpCache();
+  return true;
+});
+function restoreCachedFiles(code, restore, dataDir) {
+  try {
+    for (const list of Object.values(restore.history || {})) for (const m of list || []) for (const a of m.attachments || []) {
+      if (!a || !a.id || !a.name) continue;
+      const src = path.join(cacheRoot(), codeKey(code), safeName(a.id), safeName(a.name));
+      const dst = path.join(dataDir, 'files', safeName(a.id), safeName(a.name));
+      if (fs.existsSync(src) && !fs.existsSync(dst)) { fs.mkdirSync(path.dirname(dst), { recursive: true }); fs.copyFileSync(src, dst); }
+    }
+  } catch (err) { console.log('[cache] restaurar falhou', err.message); }
+}
+
+ipcMain.handle('host:stop', async (e, code) => { await stopHost(code); return true; });
 
 // Descobre endereços para convidar (pode demorar alguns segundos)
 ipcMain.handle('host:network', async () => {
