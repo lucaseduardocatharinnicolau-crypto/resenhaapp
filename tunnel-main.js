@@ -5,10 +5,15 @@ const net = require('net');
 const crypto = require('crypto');
 const mqtt = require('mqtt');
 
+// Brokers públicos caem com frequência: quanto mais, melhor (basta UM em comum entre anfitrião e convidado).
+// Os 3 primeiros são os originais (compatibilidade com versões antigas).
 const BROKERS = [
   'wss://broker.hivemq.com:8884/mqtt',
   'mqtts://broker.emqx.io:8883',
   'wss://test.mosquitto.org:8081',
+  'mqtts://public:public@public.cloud.shiftr.io:8883',
+  'mqtts://broker.hivemq.com:8883',
+  'wss://broker.emqx.io:8084/mqtt',
 ];
 
 const norm = (code) => String(code || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
@@ -34,7 +39,7 @@ const pool = new Map(); // url -> { c, subs: Map(topic -> Set(handler)) }
 function brokerConn(url, log) {
   let b = pool.get(url);
   if (b) return b;
-  const c = mqtt.connect(url, { connectTimeout: 8000, reconnectPeriod: 3000, keepalive: 30, clean: true, clientId: 'rs_' + crypto.randomBytes(6).toString('hex') });
+  const c = mqtt.connect(url, { connectTimeout: 15000, reconnectPeriod: 3000, keepalive: 30, clean: true, clientId: 'rs_' + crypto.randomBytes(6).toString('hex') });
   b = { c, subs: new Map() };
   c.on('connect', () => { log('broker ok', url); for (const t of b.subs.keys()) c.subscribe(t, { qos: 0 }); });
   c.on('error', (e) => log('broker erro', url, e.message));
