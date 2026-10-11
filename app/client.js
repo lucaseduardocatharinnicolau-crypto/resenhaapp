@@ -1848,11 +1848,14 @@ function roomMenu() {
 }
 
 // ---------------- Atualização ----------------
+let shownUpdate = null;
 async function checkUpdates() {
   if (!native) return;
   const r = await native.checkUpdate();
   if (!r || !r.update) return;
   const bar = $('#update-bar');
+  if (!bar.classList.contains('hidden') && shownUpdate === r.version) return; // já mostrando
+  shownUpdate = r.version;
   bar.innerHTML = `${icon('sparkles', 16)}<span>Nova versão do Resenha: <b>v${esc(r.version)}</b> (você tem v${esc(r.current)})</span><button class="btn small-btn" id="up-notes">O que mudou</button><button class="btn primary small-btn" id="up-go">Atualizar</button><button class="icon-btn small" id="up-x">${icon('x', 14)}</button>`;
   bar.classList.remove('hidden');
   document.body.classList.add('has-update');
@@ -2079,4 +2082,5 @@ bind();
 initHome();
 registerShortcuts();
 setTimeout(checkUpdates, 2500);
+setInterval(checkUpdates, 30 * 60 * 1000); // app fica dias aberto na bandeja
 window.addEventListener('beforeunload', () => { try { if (S.ws) S.ws.close(); } catch {} });
